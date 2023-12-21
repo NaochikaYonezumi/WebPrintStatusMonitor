@@ -38,7 +38,19 @@
     "retryInterval": 10  //リトライまでの時間
 }
 ```
+##システム・ヘルス・モニタリングの確認方法
+  システム・ヘルス・モニタリングは下記方法でご確認ください。
+  1. PaperCut管理者Web画面にログインします。
+  2. <オプション>タブをクリックします。
+  3. <拡張>タブをクリックします。
+  4. [システム・ヘルス・モニタリング]欄にあるGETクエリ・パラメータから"&"より後の値を取得します。
 
+     例)
+     ```
+     値: https://192.168.101.202:443/api/health/application-server/status?disk-threshold-mb=1&Authorization=qb6r8bDtHkop57a3c78suc2B4utH7sBn
+    取得する値:Authorization=qb6r8bDtHkop57a3c78suc2B4utH7sBn
+     ```
+     
 ## タスクスケジューラへの登録
   WebPrintStatusMonitorは「StartUpWebPrintStatusMonitor.vbs」をタスクスケジューラに登録することで定期的にステータスを監視することが可能です。<br>
   タスクスケジューラの登録は下記方法で実施します。
