@@ -48,7 +48,7 @@
      例)
      ```
      値: https://192.168.101.202:443/api/health/application-server/status?disk-threshold-mb=1&Authorization=qb6r8bDtHkop57a3c78suc2B4utH7sBn
-    取得する値:Authorization=qb6r8bDtHkop57a3c78suc2B4utH7sBn
+     取得する値:Authorization=qb6r8bDtHkop57a3c78suc2B4utH7sBn
      ```
      
 ## タスクスケジューラへの登録
