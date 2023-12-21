@@ -1,0 +1,26 @@
+{
+    "prHost": "********",
+    "prPort": "9191",
+    "prAuth": "Authorization=******",
+    "smtpServer": "******",
+    "smtpPort": "25",
+    "from": "****@*****",
+    "recipients": [
+        "*****@****",
+        "****@****"
+    ],
+    "Subject": {
+        "STOPPED": "WARM: WebPrintServer: {0} has been stopped.",
+        "OK": "SUCCESS: WebPrintServer: {0} has been started.",
+        "ERROR": "ERROR: WebPrintServer: {0} has encountered an error.",
+        "errorServerConnectMessage": "ERROR: The script could not connect to the primary server. Status could not be retrieved."
+    },
+    "Body": {
+        "STOPPED": "WARM: WebPrintServer: {0} has been stopped.",
+        "OK": "SUCCESS: WebPrintServer: {0} has been started.",
+        "ERROR": "ERROR: WebPrintServer: {0} has encountered an error.",
+        "errorServerConnectMessage": "ERROR: The script could not connect to the primary server. Status could not be retrieved.\r\nPlease verify if the values in config.json are correct."
+    },
+    "retryLimit": 6,
+    "retryInterval": 10
+}
