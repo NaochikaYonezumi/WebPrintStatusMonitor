@@ -8,57 +8,75 @@ $StatusChanged = $false
 $retryCount = 0 #再試行初期値
 $retryLimit = $config.retryLimit  #再試行限界回数
 $retryInterval = $config.retryInterval  #再試行間隔
-$StatusChanged = $false　#ステータス変更フラグ
-$LogDir = Join-Path $PSScriptRoot 'logs'　# ログフォルダのパスを定義
+$StatusChanged = $false #ステータス変更フラグ
+$LogDir = Join-Path $PSScriptRoot 'logs' # ログフォルダのパスを定義
 $LogFilePath = Join-Path $LogDir 'log.txt' # ログファイルのパスを定義
 $prHost = $config.prHost #プライマリ・サーバ名
 $prPort = $config.prPort #Port
-$authMonitor = $config.prAuth
+$authMonitor = $config.prAuth #認証情報
+$MaxErrorCount = 5 #通信エラー時再試行回数
+$PendingAttempt = 0 #待ち行列通信エラー初期値
+$WebPrintStatusAttempt = 0 #Webプリントステータス通信エラー初期値
+
 
 # ログを記録する関数
 function Write-Log($level, $message) {
+    # タイムスタンプの取得
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    
+    # ログメッセージの作成
     $logMessage = "$timestamp - $level - $message"
+    
+    # ログファイルにメッセージを書き込む
     Add-Content -Path $LogFilePath -Value $logMessage
 
     # ログファイルサイズと世代の管理
     if ((Get-Item $LogFilePath).Length -gt 10MB) {
-        1..9 | ForEach-Object {
-            $old = 10 - $_
-            $new = 9 - $_
-            Rename-Item -Path "$LogDir\log$old.txt" -NewName "log$new.txt" -ErrorAction SilentlyContinue
+        for ($i = 9; $i -ge 0; $i--) {
+            $old = "$LogDir\log$i.txt"
+            if (Test-Path $old) {
+                if ($i -eq 9) {
+                    # 最古のログファイルを削除
+                    Remove-Item -Path $old -ErrorAction SilentlyContinue
+                } else {
+                    # 古いログファイルの名前を変更
+                    $new = "$LogDir\log$($i + 1).txt"
+                    Rename-Item -Path $old -NewName $new -ErrorAction SilentlyContinue
+                }
+            }
         }
-        Rename-Item -Path $LogFilePath -NewName "$LogDir\log9.txt" -ErrorAction SilentlyContinue
-        Remove-Item -Path "$LogDir\log0.txt" -ErrorAction SilentlyContinue
+        # 現在のログファイルを新しい世代としてリネームし、新しいログファイルを作成
+        Rename-Item -Path $LogFilePath -NewName "$LogDir\log0.txt" -ErrorAction SilentlyContinue
+        New-Item -Path $LogFilePath -ItemType File -ErrorAction SilentlyContinue
     }
 }
-
 
 # メールを送信するための関数
 function Send-Mail($subject, $body) {
     $smtpServer = $config.smtpServer
     $smtpPort = $config.smtpPort
-    $message = New-Object System.Net.Mail.MailMessage
-    $message.From = $config.from
-    $message.Subject = $subject
-    $message.Body = $body
+    $smtpUser = $config.smtpUser
+    $smtpPassword = $config.smtpPassword
+    $fromAddress = $config.from
+    $toAddresses = [string]::Join(',', $config.recipients)
+        
+    # 相対パスでPythonスクリプトを指定
+    $scriptPath = $PSScriptRoot
+    $pythonScriptPath = Join-Path -Path $scriptPath -ChildPath "sendemail.exe"
 
-    foreach ($recipient in $config.recipients) {
-        $message.To.Add($recipient)
-    }
-
-    # SMTP クライアントオブジェクトの作成
-    $smtpClient = New-Object System.Net.Mail.SmtpClient($smtpServer, $smtpPort)
-
-    # メール送信
     try {
-        $smtpClient.Send($message)
-        Write-Log -level "INFO" -message "The email has been successfully sent."
+        # Pythonスクリプトを呼び出し
+        $result = & $pythonScriptPath $smtpServer $smtpPort $fromAddress $toAddresses $subject $body
+        Write $result
+        if ($result -like "*successfully sent*") {
+            Write-Log -level "INFO" -message "The email has been successfully sent."
+        } else {
+            Write-Log -level "ERROR" -message "The email could not be sent. Error: $result"
+        }
     } catch {
-        Write-Log -level "ERROR" -message "The email could not be sent."
+        Write-Log -level "ERROR" -message "The email could not be sent. Exception: $_"
     }
 }
-
 
 #プロトコル設定関数
 function Set-MonitorPort($prPort){
@@ -74,40 +92,81 @@ function Set-MonitorPort($prPort){
 }
 
 # Webプリントのステータス取得関数
-function get-StatusWebPrintStatus($prHost,$prPort,$authMonitor){
+function get-StatusWebPrintStatus($prHost,$prPort,$authMonitor,$WebPrintStatusAttempt){
     $protocol = Set-MonitorPort $prPort
     $Url = "${protocol}://${prHost}:${prPort}/api/health/web-print/?${authMonitor}"
+
+    $StatusFilePath = Join-Path $StatusDir "WSConnect.status"
+
+    # 過去ステータスを取得（カウントを取得）
+    $PreviousStatus = if (Test-Path $StatusFilePath) { Get-Content $StatusFilePath } else { "0" }
+    $ErrorCount = [int]$PreviousStatus
+
     # URLからJSONデータを取得します
     try {
         $Response = Invoke-RestMethod -Uri $Url
         Write-Log -level "INFO" -message "Successfully connected to $Url."
+        # カウントをリセットして保存
+        Set-Content -Path $StatusFilePath -Value "0"
         return $Response
     } catch {
-        Write-Log -level "ERROR" -message "Unable to connect to $Url."
-        $Body = $config.Body.errorServerConnectMessage
-        $Subject = $config.Subject.errorServerConnectMessage
-        Send-Mail -subject $Subject -body $Body
-        Write-Log -level "INFO" -message "Mail sent with subject: $Subject."
-        exit
+        $WebPrintStatusAttempt ++
+        Write-Log -level "ERROR" -message "Unable to connect to $Url. Attempt $WebPrintStatusAttempt of $retryLimit"
+
+        if ($WebPrintStatusAttempt -eq $retryLimit) {
+            $ErrorCount++
+            # カウントを保存
+            Set-Content -Path $StatusFilePath -Value $ErrorCount
+            Write-Log -level "ERROR" -message "Failed to connect after $retryLimit attempts. Incrementing error count to $ErrorCount."
+        
+            if ($ErrorCount -eq $MaxErrorCount) {
+                Write-Log -level "ERROR" -message "Reached maximum error attempts ($MaxErrorCount). Executing error handler."
+                if($ErrorCount -eq $MaxErrorCount){
+                    $Body = $config.Body.errorServerConnectMessage
+                    $Subject = $config.Subject.errorServerConnectMessage
+                    Send-Mail -subject $Subject -body $Body
+                }
+            }
+        }
+    return $Response,$WebPrintStatusAttempt
     }
 }
 
 # Webプリントの待ち行列
-function get-StatusWebPrintJobsPending($prHost,$prPort,$authMonitor){
+function get-StatusWebPrintJobsPending($prHost, $prPort, $authMonitor, $PendingAttempt) {
     $protocol = Set-MonitorPort $prPort
     $Url = "${protocol}://${prHost}:${prPort}/api/health/?${authMonitor}"
-    # URLからJSONデータを取得します
+    $StatusFilePath = Join-Path $StatusDir "JPConnect.status"
+
+    # 過去ステータスを取得（カウントを取得）
+    $PreviousStatus = if (Test-Path $StatusFilePath) { Get-Content $StatusFilePath } else { "0" }
+    $ErrorCount = [int]$PreviousStatus
+
     try {
         $Response = Invoke-RestMethod -Uri $Url
         Write-Log -level "INFO" -message "Successfully connected to $Url."
-        return $Response
+
+        # カウントをリセットして保存
+        Set-Content -Path $StatusFilePath -Value "0"
+        return $Response,$PendingAttempt
     } catch {
-        Write-Log -level "ERROR" -message "Unable to connect to $Url."
-        $Body = $config.Body.errorServerConnectMessage
-        $Subject = $config.Subject.errorServerConnectMessage
-        Send-Mail -subject $Subject -body $Body
-        Write-Log -level "INFO" -message "Mail sent with subject: $Subject."
-        exit
+        $PendingAttempt ++
+        Write-Log -level "ERROR" -message "Unable to connect to $Url. Attempt $PendingAttempt of $retryLimit"
+        
+        if ($PendingAttempt -eq $retryLimit) {
+            $ErrorCount++
+            Set-Content -Path $StatusFilePath -Value $ErrorCount
+            Write-Log -level "ERROR" -message "Failed to connect after $retryLimit attempts. Incrementing error count to $ErrorCount."
+
+            if ($ErrorCount -eq $MaxErrorCount) {
+                Write-Log -level "ERROR" -message "Reached maximum error attempts ($MaxErrorCount). Executing error handler."
+                $Body = $config.Body.errorServerConnectMessage
+                $Subject = $config.Subject.errorServerConnectMessage
+                #Send-Mail -subject $Subject -body $Body
+            }
+            exit
+        }
+    return $Response,$PendingAttempt
     }
 }
 
@@ -123,17 +182,19 @@ function CheckStatusChange ($CurrentStatus, $PreviousStatus, $ServerHost, $confi
 }
 
 # main
-#　各フォルダがない場合は作成
+# 各フォルダがない場合は作成
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir }
 if (-not (Test-Path $StatusDir)) { New-Item -ItemType Directory -Path $StatusDir }
 
 while ($retryCount -lt $retryLimit) {
-    $Response = get-StatusWebPrintStatus $prHost $prPort $authMonitor
-    $Response2 = get-StatusWebPrintJobsPending $prHost $prPort $authMonitor
+    $Response = get-StatusWebPrintStatus $prHost $prPort $authMonitor $WebPrintStatusAttempt
+    $Response2 = get-StatusWebPrintJobsPending $prHost $prPort $authMonitor $PendingAttempt
     Write-Log -level "INFO" -message "PendingJobs: $($Response2.webPrint.pendingJobs)."
-    Write-Output "PendingJobs: $($Response2.webPrint.pendingJobs)"
+    $WebPrintStatusAttempt = $Response[1]
+    $PendingAttempt = $Response2[1]
 
-    #各サーバに対して処理を実施
+
+    # 各サーバに対して処理を実施
     $Response.servers | ForEach-Object {
         $ServerHost = $_.host
         $Status = $_.status
@@ -147,6 +208,8 @@ while ($retryCount -lt $retryLimit) {
         Set-Content -Path $StatusFilePath -Value $Status
         # ステータス確認関数の呼び出し
         CheckStatusChange $Status $PreviousStatus $ServerHost $config
+        #空白.statusの削除
+        Get-ChildItem -Path $StatusDir -Filter .status | Remove-Item -Force
     }
     Start-Sleep -Seconds $retryInterval
     $retryCount++
