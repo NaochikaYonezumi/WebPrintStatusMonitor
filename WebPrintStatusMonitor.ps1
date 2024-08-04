@@ -95,19 +95,23 @@ function Set-MonitorPort($prPort){
 function get-StatusWebPrintStatus($prHost,$prPort,$authMonitor,$WebPrintStatusAttempt){
     $protocol = Set-MonitorPort $prPort
     $Url = "${protocol}://${prHost}:${prPort}/api/health/web-print/?${authMonitor}"
-
     $StatusFilePath = Join-Path $StatusDir "WSConnect.status"
 
     # 過去ステータスを取得（カウントを取得）
     $PreviousStatus = if (Test-Path $StatusFilePath) { Get-Content $StatusFilePath } else { "0" }
     $ErrorCount = [int]$PreviousStatus
-
     # URLからJSONデータを取得します
     try {
         $Response = Invoke-RestMethod -Uri $Url
         Write-Log -level "INFO" -message "Successfully connected to $Url."
         # カウントをリセットして保存
         Set-Content -Path $StatusFilePath -Value "0"
+        if ($ErrorCount -ne 0){ 
+            $Body = "SUCCESS:Connection to the PaperCut primary Server has been restored."
+            $Subject = "SUCCESS:Connection to the PaperCut primary Server has been restored."
+            Send-Mail -subject $Subject -body $Body
+            Write-Log -level "INFO" -message "Unable to connect to $Url. Attempt $WebPrintStatusAttempt of $retryLimit"
+        }
         return $Response
     } catch {
         $WebPrintStatusAttempt ++
@@ -181,36 +185,40 @@ function CheckStatusChange ($CurrentStatus, $PreviousStatus, $ServerHost, $confi
     }
 }
 
-# main
-# 各フォルダがない場合は作成
-if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir }
-if (-not (Test-Path $StatusDir)) { New-Item -ItemType Directory -Path $StatusDir }
+# メイン処理
+function Main {
+    if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir }
+    if (-not (Test-Path $StatusDir)) { New-Item -ItemType Directory -Path $StatusDir }
 
-while ($retryCount -lt $retryLimit) {
-    $Response = get-StatusWebPrintStatus $prHost $prPort $authMonitor $WebPrintStatusAttempt
-    $Response2 = get-StatusWebPrintJobsPending $prHost $prPort $authMonitor $PendingAttempt
-    Write-Log -level "INFO" -message "PendingJobs: $($Response2.webPrint.pendingJobs)."
-    $WebPrintStatusAttempt = $Response[1]
-    $PendingAttempt = $Response2[1]
+    while ($retryCount -lt $retryLimit) {
+        $Response = get-StatusWebPrintStatus $prHost $prPort $authMonitor $WebPrintStatusAttempt
+        $Response2 = get-StatusWebPrintJobsPending $prHost $prPort $authMonitor $PendingAttempt
+        Write-Log -level "INFO" -message "PendingJobs: $($Response2.webPrint.pendingJobs)."
+        $WebPrintStatusAttempt = $Response[1]
+        $PendingAttempt = $Response2[1]
 
 
-    # 各サーバに対して処理を実施
-    $Response.servers | ForEach-Object {
-        $ServerHost = $_.host
-        $Status = $_.status
-        Write-Log -level "INFO" -message "ServerName: ${ServerHost} Status: ${Status}."
-        Write-Output "ServerName: ${ServerHost} Status: ${Status}."
-        $StatusFilePath = Join-Path $StatusDir "$ServerHost.status"
-        #過去ステータス
-        $PreviousStatus = if (Test-Path $StatusFilePath) { Get-Content $StatusFilePath } else { $null }
-        Write-Output "ServerName: ${ServerHost} PreviousStatus: ${PreviousStatus}."
-        #現在のステータスを書き込む
-        Set-Content -Path $StatusFilePath -Value $Status
-        # ステータス確認関数の呼び出し
-        CheckStatusChange $Status $PreviousStatus $ServerHost $config
-        #空白.statusの削除
-        Get-ChildItem -Path $StatusDir -Filter .status | Remove-Item -Force
+        # 各サーバに対して処理を実施
+        $Response.servers | ForEach-Object {
+            $ServerHost = $_.host
+            $Status = $_.status
+            Write-Log -level "INFO" -message "ServerName: ${ServerHost} Status: ${Status}."
+            Write-Output "ServerName: ${ServerHost} Status: ${Status}."
+            $StatusFilePath = Join-Path $StatusDir "$ServerHost.status"
+            #過去ステータス
+            $PreviousStatus = if (Test-Path $StatusFilePath) { Get-Content $StatusFilePath } else { $null }
+            Write-Output "ServerName: ${ServerHost} PreviousStatus: ${PreviousStatus}."
+            #現在のステータスを書き込む
+            Set-Content -Path $StatusFilePath -Value $Status
+            # ステータス確認関数の呼び出し
+            CheckStatusChange $Status $PreviousStatus $ServerHost $config
+            #空白.statusの削除
+            Get-ChildItem -Path $StatusDir -Filter .status | Remove-Item -Force
+        }
+        Start-Sleep -Seconds $retryInterval
+        $retryCount++
     }
-    Start-Sleep -Seconds $retryInterval
-    $retryCount++
 }
+
+# メイン処理の実行
+Main
